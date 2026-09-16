@@ -15,6 +15,9 @@
     <Project Path="src/Ordering/Ordering.Domain/Ordering.Domain.csproj" />
     <Project Path="src/Ordering/Ordering.Infrastructure/Ordering.Infrastructure.csproj" />
   </Folder>
+  <Folder Name="/src/Shared/">
+    <Project Path="src/Shared/QuickOrder.Contracts/QuickOrder.Contracts.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Catalog.Domain.Tests/Catalog.Domain.Tests.csproj" />
     <Project Path="tests/Catalog.IntegrationTests/Catalog.IntegrationTests.csproj" />
