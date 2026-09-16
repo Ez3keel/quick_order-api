@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Ordering.Application.Abstractions;
 using Ordering.Infrastructure.Catalog;
+using Ordering.Infrastructure.Outbox;
 using Ordering.Infrastructure.Persistence;
 
 namespace Ordering.Infrastructure;
@@ -26,6 +27,9 @@ public static class DependencyInjection
 
         services.AddScoped<IOrderRepository, OrderRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
+
+        services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.AddHostedService<OutboxPublisher>();
 
         return services;
     }
