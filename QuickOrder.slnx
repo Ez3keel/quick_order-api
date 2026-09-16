@@ -1,7 +1,10 @@
 <Solution>
   <Folder Name="/src/" />
   <Folder Name="/src/Catalog/">
+    <Project Path="src/Catalog/Catalog.Api/Catalog.Api.csproj" />
+    <Project Path="src/Catalog/Catalog.Application/Catalog.Application.csproj" />
     <Project Path="src/Catalog/Catalog.Domain/Catalog.Domain.csproj" />
+    <Project Path="src/Catalog/Catalog.Infrastructure/Catalog.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/src/Delivery/">
     <Project Path="src/Delivery/Delivery.Domain/Delivery.Domain.csproj" />
@@ -11,6 +14,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Catalog.Domain.Tests/Catalog.Domain.Tests.csproj" />
+    <Project Path="tests/Catalog.IntegrationTests/Catalog.IntegrationTests.csproj" />
     <Project Path="tests/Delivery.Domain.Tests/Delivery.Domain.Tests.csproj" />
     <Project Path="tests/Ordering.Domain.Tests/Ordering.Domain.Tests.csproj" />
   </Folder>
