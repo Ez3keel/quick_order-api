@@ -277,3 +277,91 @@ deployáveis e testáveis independentemente — exatamente o acoplamento que a e
 microsserviços (item 1) tenta evitar. O limite certo pra fake vs. real é "esse é um
 processo que este serviço não possui": Postgres do Ordering é real porque é dele;
 Catalog é fake porque pertence a outro serviço.
+
+---
+
+## Fase 3 — Outbox Pattern + RabbitMQ
+
+### 20. `QuickOrder.Contracts`: a única exceção deliberada à regra de "sem shared kernel"
+
+Criamos um projeto novo, `src/Shared/QuickOrder.Contracts`, com os records dos eventos
+de integração (`OrderReadyForAssignmentIntegrationEvent`,
+`MenuItemPriceChangedIntegrationEvent`, etc.) referenciado por Catalog.Infrastructure e
+Ordering.Infrastructure (e, nas próximas fases, por Delivery e Notification também).
+
+**Por quê:** o item 2 (Fase 0) dizia que não haveria shared kernel de *domínio* entre
+serviços — isso continua verdade, `Order`, `Restaurant`, `Money` etc. nunca são
+compartilhados. Mas o **formato da mensagem publicada na fila** precisa ser idêntico
+entre quem produz e quem consome; se cada serviço serializasse seu próprio evento de
+domínio diretamente, qualquer refactor interno (renomear uma propriedade do domínio,
+por exemplo) quebraria silenciosamente todo consumidor. Um pacote de contratos é
+exatamente o que uma definição de API pública (tipo um `.proto` do gRPC ou um schema
+Avro) faria em qualquer sistema de mensageria real — é a interface, não a
+implementação, que é compartilhada.
+
+### 21. Evento de domínio ≠ evento de integração — sempre existe um *mapper* entre os dois
+
+`CatalogIntegrationEventMapper`/`OrderingIntegrationEventMapper` traduzem
+`MenuItemPriceChangedEvent` (interno, `Catalog.Domain`) para
+`MenuItemPriceChangedIntegrationEvent` (público, `QuickOrder.Contracts`) — nunca
+serializamos o evento de domínio diretamente.
+
+**Por quê:** o evento de domínio é livre pra mudar de forma junto com o agregado (é
+código interno); o evento de integração é uma API pública com consumidores externos e
+precisa ser versionado com mais cuidado. Separar os dois desde o início evita a
+armadilha comum de "vazar" o modelo de domínio pra fora do serviço.
+
+### 22. Outbox: captura de eventos dentro do `SaveChangesAsync` do próprio `DbContext`
+
+`CatalogDbContext`/`OrderingDbContext` sobrescrevem `SaveChangesAsync`: antes de
+delegar pra `base.SaveChangesAsync`, percorrem o `ChangeTracker` procurando entidades
+`IHasDomainEvents` com eventos pendentes, mapeiam cada evento pra uma linha de
+`OutboxMessage` (adicionada ao mesmo `DbContext`), e só então chamam
+`base.SaveChangesAsync`.
+
+**Por quê:** o EF Core já envolve uma chamada de `SaveChangesAsync` inteira numa única
+transação implícita — não precisamos abrir uma transação manual. Gravar o agregado e
+a mensagem de outbox na mesma chamada garante atomicidade "de graça": ou os dois
+persistem, ou nenhum persiste. `IHasDomainEvents` é uma interface pequena que
+`AggregateRoot<TId>` já implementa (ela só expõe o que a classe já tinha), então
+capturar eventos de *qualquer* agregado não exige que o `DbContext` conheça tipos
+concretos como `Restaurant` ou `Order`.
+
+### 23. `OutboxPublisher`: um `BackgroundService` com *dois* níveis de retry
+
+O publisher faz polling da tabela Outbox a cada 2s e publica no RabbitMQ. Existem dois
+mecanismos de retentativa deliberadamente separados:
+
+1. **Por mensagem** (`OutboxMessage.MarkFailed`): se publicar uma mensagem específica
+   falhar, ela ganha um `NextAttemptAtUtc` com backoff exponencial (2s, 4s, 8s...) e
+   um `RetryCount`; depois de `MaxRetries` (5), fica "presa" com o erro registrado em
+   vez de bloquear as mensagens seguintes pra sempre (um poison-message guard simples,
+   sem precisar de uma DLQ de verdade só pro publisher).
+2. **Do laço inteiro** (`ExecuteAsync`): se a conexão com o RabbitMQ cair no meio
+   (não só falhar uma mensagem, mas o laço inteiro morrer), o `ExecuteAsync` reconecta
+   do zero com o mesmo backoff exponencial, em vez de deixar a exceção subir.
+
+**Por quê o nível 2 importa mais do que parece:** por padrão, o generic host do
+ASP.NET Core **derruba a aplicação inteira** se o `ExecuteAsync` de um
+`BackgroundService` lançar uma exceção não tratada
+(`HostOptions.BackgroundServiceExceptionBehavior = StopHost`, o padrão desde o .NET
+6). Isso mordeu a gente ao vivo: os testes de integração do Catalog começaram a
+falhar com `ObjectDisposedException` no `TestServer` — não porque a API quebrou, mas
+porque o RabbitMQ do teste demorou a aceitar a conexão, o publisher lançou, e o host
+inteiro (API incluída) foi abaixo silenciosamente. A correção foi envolver **todo** o
+corpo do `ExecuteAsync` (conectar, declarar exchange, laço de publicação) num retry
+externo — não só a conexão inicial. Lição prática: qualquer `BackgroundService` que
+fale com infraestrutura externa precisa ser resiliente à própria falha, porque o custo
+de deixar vazar é a aplicação inteira cair, não só aquele serviço.
+
+### 24. Routing key = nome do tipo do evento, exchange topic por serviço
+
+`RoutingKey.For<TEvent>()` (em `QuickOrder.Contracts`) usa `typeof(TEvent).Name` como
+routing key — `"catalog.events"` e `"ordering.events"` são exchanges do tipo *topic*,
+uma por serviço produtor.
+
+**Por quê:** manter a lógica de nomeação num único lugar (o pacote de contratos)
+garante que quem publica e quem assina (Fase 4+) derivem a mesma string sem precisar
+copiar/colar um "nome mágico". Exchanges topic (em vez de fanout ou direct) deixam a
+porta aberta pra um consumidor futuro assinar só um subconjunto de eventos por
+padrão de routing key, sem exigir uma exchange nova por tipo de evento.
