@@ -10,12 +10,16 @@
     <Project Path="src/Delivery/Delivery.Domain/Delivery.Domain.csproj" />
   </Folder>
   <Folder Name="/src/Ordering/">
+    <Project Path="src/Ordering/Ordering.Api/Ordering.Api.csproj" />
+    <Project Path="src/Ordering/Ordering.Application/Ordering.Application.csproj" />
     <Project Path="src/Ordering/Ordering.Domain/Ordering.Domain.csproj" />
+    <Project Path="src/Ordering/Ordering.Infrastructure/Ordering.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Catalog.Domain.Tests/Catalog.Domain.Tests.csproj" />
     <Project Path="tests/Catalog.IntegrationTests/Catalog.IntegrationTests.csproj" />
     <Project Path="tests/Delivery.Domain.Tests/Delivery.Domain.Tests.csproj" />
     <Project Path="tests/Ordering.Domain.Tests/Ordering.Domain.Tests.csproj" />
+    <Project Path="tests/Ordering.IntegrationTests/Ordering.IntegrationTests.csproj" />
   </Folder>
 </Solution>
