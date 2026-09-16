@@ -15,6 +15,8 @@ public sealed record OrderItem
 
     public Money Subtotal => UnitPrice * Quantity;
 
+    private OrderItem() => ProductName = null!;
+
     public OrderItem(Guid menuItemId, string productName, Money unitPrice, int quantity)
     {
         if (menuItemId == Guid.Empty)
