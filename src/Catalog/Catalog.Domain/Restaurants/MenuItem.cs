@@ -12,6 +12,8 @@ public sealed class MenuItem : Entity<MenuItemId>
     public Money Price { get; private set; }
     public bool IsAvailable { get; private set; }
 
+    private MenuItem() => Name = null!;
+
     internal MenuItem(MenuItemId id, string name, Money price) : base(id)
     {
         Name = name;
