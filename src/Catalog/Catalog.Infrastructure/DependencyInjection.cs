@@ -1,5 +1,6 @@
 using Catalog.Application.Abstractions;
 using Catalog.Infrastructure.Caching;
+using Catalog.Infrastructure.Outbox;
 using Catalog.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -28,6 +29,9 @@ public static class DependencyInjection
         services.AddScoped<IRestaurantRepository, RestaurantRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddSingleton<IMenuCache, RedisMenuCache>();
+
+        services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
+        services.AddHostedService<OutboxPublisher>();
 
         return services;
     }
