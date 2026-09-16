@@ -214,3 +214,66 @@ neste projeto, porque o host do ASP.NET Core (com `Program.cs` de top-level stat
 já constrói o `IConfiguration` final antes desse hook rodar. `UseSetting` escreve
 direto na fonte de configuração que o `WebApplicationFactory` controla, então sempre
 tem prioridade.
+
+---
+
+## Fase 2 — Ordering API
+
+### 16. Ordering valida contra o Catalog via HTTP síncrono só no momento de criar o pedido
+
+`PlaceOrderCommandHandler` chama `ICatalogClient.GetRestaurantAsync` (implementado por
+`HttpCatalogClient`, um `HttpClient` tipado sem retry ainda) pra buscar o restaurante,
+conferir que está aberto, e validar cada item pedido contra o cardápio antes de montar
+os `OrderItem` (snapshot de nome/preço). Esse é o único ponto do sistema onde Ordering
+depende de uma resposta síncrona do Catalog — todo o resto do ciclo de vida do pedido
+(preparo, atribuição, entrega) é interno ao agregado `Order` e não faz nenhuma outra
+chamada de rede.
+
+**Por quê:** o cliente precisa saber, na hora, se o item existe/está disponível e
+qual o preço atual — isso é inerentemente uma pergunta "agora", não algo que dá pra
+responder de forma assíncrona sem piorar a experiência de quem está fazendo o pedido.
+Não tem política de retry ainda de propósito: reproduzir a mesma falta de resiliência
+que a maioria dos projetos tem no primeiro rascunho, e só then introduzir Polly na
+Fase 7 como melhoria deliberada e comparável (antes/depois), em vez de já nascer
+"resiliente" sem nunca termos visto o problema que a resiliência resolve.
+
+### 17. `RestaurantUnavailableException`/`MenuItemUnavailableException` viram 409, não 404
+
+Quando o Catalog não conhece o restaurante, está fechado, ou o item não existe/está
+indisponível, a Ordering API responde `409 Conflict`, não `404 Not Found`.
+
+**Por quê:** o recurso que o cliente está tentando criar é o **pedido**, não o
+restaurante — a URL chamada (`POST /api/orders`) sempre existe. Um 404 sugeriria que a
+própria rota está errada; um 409 comunica corretamente "sua requisição é válida, mas o
+estado atual do sistema não permite completá-la agora" (restaurante fechado é
+exatamente esse tipo de conflito temporário).
+
+### 18. `OrderItem` (value object sem identidade) também virou entidade no mapeamento EF
+
+Mesmo problema do item 12 (Catalog), mesma solução: `OrderItem.UnitPrice` é `Money`
+(struct), então `OrderItem` precisou de uma chave substituta (`Id` sombra,
+`ValueGeneratedOnAdd`) e configuração própria (`OrderItemConfiguration`) pra poder usar
+`ComplexProperty`. `OrderItem` continua sendo, no domínio, um `record` sem identidade
+própria — a chave é 100% um detalhe de storage, invisível pra `Order`.
+
+Efeito colateral que vale registrar: como `OrderItem` é um `record` sem construtor
+vazio, o EF Core tentou usar **constructor binding** (materializar chamando o
+construtor público direto) e falhou, porque não sabe construir um `Money` (tipo
+complexo) como argumento de construtor de outra entidade. A correção foi a mesma do
+`MenuItem`: adicionar um construtor privado sem parâmetros, fazendo o EF cair para
+materialização via reflection sobre os backing fields das propriedades `{ get; }`.
+
+### 19. Testes de integração do Ordering usam um Postgres real, mas um `ICatalogClient` falso
+
+`OrderingApiFactory` sobe um Postgres real via Testcontainers (a infraestrutura que
+este serviço *possui*), mas substitui `ICatalogClient` por `FakeCatalogClient` — um
+dicionário em memória que cada teste popula com o restaurante/cardápio que precisa —
+via `ConfigureTestServices` + `RemoveAll<ICatalogClient>()`.
+
+**Por quê:** o Catalog é outro serviço, com seu próprio ciclo de vida e sua própria
+suíte de integração (Fase 1). Subir o processo do Catalog inteiro dentro do teste do
+Ordering criaria uma dependência de teste entre dois serviços que deveriam ser
+deployáveis e testáveis independentemente — exatamente o acoplamento que a escolha por
+microsserviços (item 1) tenta evitar. O limite certo pra fake vs. real é "esse é um
+processo que este serviço não possui": Postgres do Ordering é real porque é dele;
+Catalog é fake porque pertence a outro serviço.
