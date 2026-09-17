@@ -365,3 +365,107 @@ garante que quem publica e quem assina (Fase 4+) derivem a mesma string sem prec
 copiar/colar um "nome mágico". Exchanges topic (em vez de fanout ou direct) deixam a
 porta aberta pra um consumidor futuro assinar só um subconjunto de eventos por
 padrão de routing key, sem exigir uma exchange nova por tipo de evento.
+
+---
+
+## Fase 4 — Delivery Assignment Worker
+
+### 25. Delivery vira dois processos: `Delivery.Api` (couriers) e `Delivery.Worker` (consumer)
+
+`Delivery.Api` expõe HTTP para gestão de entregadores (registrar, ficar online,
+atualizar localização, ficar offline). `Delivery.Worker` é um Worker Service (sem
+HTTP) que roda só o `OutboxPublisher` e o `OrderReadyForAssignmentConsumer`. Os dois
+compartilham `Delivery.Application` e `Delivery.Infrastructure`, mas rodam como
+binários/containers separados, contra o mesmo Postgres.
+
+**Por quê:** a intenção original (Fase 0, tabela de serviços) era um worker "só fila,
+sem API HTTP própria" — mas alguém precisa cadastrar entregadores e atualizar
+localização, e isso é inerentemente uma operação request/response, não um evento.
+Separar em dois processos preserva as duas coisas: o consumidor de fila escala e
+reinicia independentemente da API HTTP (motivos de deploy completamente diferentes —
+um lida com tráfego de app de entregador, o outro com throughput de fila), mas nenhum
+dos dois duplica lógica de domínio ou de persistência.
+
+### 26. Consumer único real: prefetch=1, sem lock distribuído, exatamente como planejado
+
+`OrderReadyForAssignmentConsumer` declara `BasicQos(prefetchCount: 1)` e roda como
+única instância do `BackgroundService`. `AssignCourierCommandHandler` conta com essa
+garantia explicitamente (ver o comentário no próprio comando): escolher um entregador
+no Redis e reservá-lo no Postgres não precisa de lock porque o broker já serializa a
+entrega de mensagens — não existem duas execuções concorrentes do handler neste
+processo disputando o mesmo entregador.
+
+**Por quê isso é o contraponto ao TicketFlow:** lá, reserva de assento usava lock
+distribuído no Redis porque múltiplos clientes HTTP concorrentes disputavam o mesmo
+recurso em paralelo — a concorrência era inerente ao problema. Aqui, a atribuição de
+entregador é processada como um pipeline sequencial por natureza (uma fila), então a
+serialização "vem de graça" da arquitetura de mensageria em vez de precisar ser
+construída explicitamente. `Courier.Reserve()` ainda valida a invariante de status por
+segurança (defesa em profundidade), mas na prática nunca vai encontrar uma corrida.
+
+### 27. Índice de disponibilidade no Redis: GEO set, seleção aleatória por enquanto
+
+`RedisCourierAvailabilityIndex` guarda entregadores disponíveis num Redis GEO set
+(`GEOADD`/`ZREM`/`ZRANDMEMBER`) chaveado por `courierId`. A seleção hoje é aleatória
+(`SortedSetRandomMemberAsync`), não "o mais próximo do restaurante".
+
+**Por quê:** `Restaurant` (Catalog) ainda não modela endereço/coordenadas — adicionar
+isso só para viabilizar uma busca geoespacial seria escopo além do que a Fase 4 pediu.
+Guardar os entregadores num GEO set (em vez de um Set comum) significa que, quando
+Catalog ganhar coordenadas de restaurante, a troca pra "entregador mais próximo" é só
+trocar `ZRANDMEMBER` por `GEOSEARCH` — a estrutura de dados já está pronta pra isso,
+sem precisar migrar nada.
+
+### 28. Idempotência do consumidor: tabela `ProcessedMessages`, chave é o `EventId`
+
+Antes de processar, o consumidor confere se `integrationEvent.EventId` já existe em
+`ProcessedMessages`; se sim, só dá ack e sai. O `EventId` é gerado uma vez pelo mapper
+do Outbox e persistido no `Content` da mensagem — uma redelivery do RabbitMQ (mesma
+mensagem reenviada após um crash antes do ack) carrega o mesmo `EventId`, então a
+verificação pega exatamente o cenário de entrega duplicada que o "at-least-once" do
+RabbitMQ garante que vai acontecer eventualmente.
+
+**Por quê no Postgres, e não no Redis:** o registro em `ProcessedMessages` precisa ser
+gravado na **mesma transação** que a atribuição em si (`DeliveryAssignment` +
+`Courier.Reserve()`) — se o processo cair entre gravar a atribuição e marcar a
+mensagem como processada, sem essa atomicidade o próximo redelivery criaria uma
+segunda atribuição. Redis não participa dessa transação do EF Core.
+
+### 29. Retry do consumidor: topologia explícita de fila-de-delay, não `x-death`
+
+Ao falhar, o consumidor não deixa o RabbitMQ decidir a rota via
+dead-letter-exchange-no-nack; ele lê um header próprio (`x-retry-count`, que ele
+mesmo escreve) e republica manualmente:
+
+- tentativa < 3: republica em `delivery.order-ready-for-assignment.retry` (fila com
+  TTL de 5s e dead-letter de volta pra fila principal — o "delay queue" clássico do
+  RabbitMQ) com `x-retry-count` incrementado;
+- tentativa ≥ 3: publica direto em
+  `delivery.order-ready-for-assignment.dlq` (fila terminal) em vez de tentar de novo.
+
+Em ambos os casos, a mensagem original recebe ack (ela foi "movida" logicamente, não
+fica reprocessando na fila principal enquanto isso).
+
+**Por quê não usar o header `x-death` que o RabbitMQ adiciona automaticamente em
+dead-lettering:** ele existe, mas seu formato (lista de dicionários aninhados,
+serialização que varia por client) é mais frágil de interpretar corretamente do que
+controlar a contagem de tentativas no próprio código. Manter o contador explícito é
+mais verboso mas elimina uma fonte de bug sutil.
+
+**Falta transitória vs. permanente:** `NoCourierAvailableException` (nenhum
+entregador online agora) e qualquer outra exceção passam pelo mesmo caminho de
+retry — "não tem entregador" é tratado como uma falha transitória (alguém pode ficar
+online a qualquer momento), exatamente como uma falha de rede seria.
+
+### 30. Teste de integração prova o DLQ de verdade, não só o código do retry
+
+`PublishingEvent_WithNoCourierAvailable_EndsUpInTheDeadLetterQueueAfterRetries`
+publica um evento sem nenhum entregador online e espera até 30s pela mensagem
+aparecer na fila `delivery.order-ready-for-assignment.dlq` de verdade.
+
+**Por quê vale o tempo de execução mais longo (retry com delay de 5s × 3
+tentativas):** testar só que `RetryOrDeadLetterAsync` foi chamado com os parâmetros
+certos provaria que o código *tentou* fazer a coisa certa; publicar de verdade e
+esperar a mensagem emergir do outro lado do RabbitMQ prova que a topologia de filas
+(exchange, bindings, TTL, dead-letter routing) está configurada corretamente — é
+exatamente o tipo de erro de configuração que só aparece contra um broker real.
