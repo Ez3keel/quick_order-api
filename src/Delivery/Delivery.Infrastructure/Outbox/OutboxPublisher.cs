@@ -1,10 +1,13 @@
+using System.Diagnostics;
 using System.Text;
+using Delivery.Infrastructure.Observability;
 using Delivery.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using QuickOrder.Contracts.Messaging;
 using RabbitMQ.Client;
 
 namespace Delivery.Infrastructure.Outbox;
@@ -88,8 +91,7 @@ public sealed class OutboxPublisher(
         {
             try
             {
-                var body = Encoding.UTF8.GetBytes(message.Content);
-                await channel.BasicPublishAsync(exchange, message.Type, body, stoppingToken);
+                await PublishOneAsync(channel, exchange, message, stoppingToken);
                 message.MarkProcessed(DateTimeOffset.UtcNow);
             }
             catch (Exception exception) when (message.CanRetry)
@@ -108,5 +110,23 @@ public sealed class OutboxPublisher(
 
         await dbContext.SaveChangesAsync(stoppingToken);
         return true;
+    }
+
+    private static async Task PublishOneAsync(IChannel channel, string exchange, OutboxMessage message, CancellationToken cancellationToken)
+    {
+        var parentContext = message.TraceParent is not null && ActivityContext.TryParse(message.TraceParent, null, out var parsed)
+            ? parsed
+            : default;
+
+        using var activity = DeliveryActivitySource.Instance.StartActivity(
+            $"{exchange} publish {message.Type}", ActivityKind.Producer, parentContext);
+
+        var headers = new Dictionary<string, object?>();
+        TraceContextPropagation.Inject(activity, headers);
+
+        var properties = new BasicProperties { Persistent = true, Headers = headers };
+        var body = Encoding.UTF8.GetBytes(message.Content);
+
+        await channel.BasicPublishAsync(exchange, message.Type, mandatory: false, properties, body, cancellationToken);
     }
 }

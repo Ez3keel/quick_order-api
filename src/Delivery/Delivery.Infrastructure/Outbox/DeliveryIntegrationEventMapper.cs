@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Delivery.Domain.Assignments.Events;
 using Delivery.Domain.Common;
@@ -27,6 +28,6 @@ public static class DeliveryIntegrationEventMapper
         var routingKey = RoutingKey.For(integrationEvent.GetType());
         var content = JsonSerializer.Serialize(integrationEvent, integrationEvent.GetType());
 
-        return OutboxMessage.Create(Guid.NewGuid(), routingKey, content, domainEvent.OccurredOn);
+        return OutboxMessage.Create(Guid.NewGuid(), routingKey, content, domainEvent.OccurredOn, Activity.Current?.Id);
     }
 }

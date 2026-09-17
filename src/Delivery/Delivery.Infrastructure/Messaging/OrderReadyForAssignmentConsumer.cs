@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Delivery.Application.Assignments.Commands.AssignCourier;
 using Delivery.Application.Assignments.Exceptions;
+using Delivery.Infrastructure.Observability;
 using Delivery.Infrastructure.Outbox;
 using Delivery.Infrastructure.Persistence;
 using MediatR;
@@ -118,6 +120,14 @@ public sealed class OrderReadyForAssignmentConsumer(
             await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, stoppingToken);
             return;
         }
+
+        // Links this consumer's span to whatever produced the message (Ordering's
+        // OutboxPublisher span) so the trace stays connected across the queue hop —
+        // RabbitMQ carries no trace context on its own, the header was put there
+        // manually by the producer (see TraceContextPropagation).
+        var parentContext = TraceContextPropagation.Extract(delivery.BasicProperties.Headers);
+        using var activity = DeliveryActivitySource.Instance.StartActivity(
+            $"{MainQueue} process", ActivityKind.Consumer, parentContext);
 
         using var scope = scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<DeliveryDbContext>();
