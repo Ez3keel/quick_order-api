@@ -1,0 +1,198 @@
+x-jwt: &jwt
+  Jwt__Issuer: quickorder-identity
+  Jwt__Audience: quickorder
+  Jwt__SigningKey: dev-only-signing-key-not-for-production-use-change-me-32bytes
+
+x-otel: &otel
+  Otel__OtlpEndpoint: http://jaeger:4317
+
+x-rabbitmq-conn: &rabbitmq-conn
+  RabbitMq__HostName: rabbitmq
+  RabbitMq__Port: 5672
+  RabbitMq__UserName: guest
+  RabbitMq__Password: guest
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317"   # OTLP gRPC
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  identity-api:
+    build:
+      context: .
+      dockerfile: src/Identity/Identity.Api/Dockerfile
+    environment:
+      <<: [*jwt, *otel]
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: 8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=quickorder_identity;Username=postgres;Password=postgres
+    ports:
+      - "5084:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  catalog-api:
+    build:
+      context: .
+      dockerfile: src/Catalog/Catalog.Api/Dockerfile
+    environment:
+      <<: [*jwt, *otel, *rabbitmq-conn]
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: 8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=quickorder_catalog;Username=postgres;Password=postgres
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__Exchange: catalog.events
+    ports:
+      - "5080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  ordering-api:
+    build:
+      context: .
+      dockerfile: src/Ordering/Ordering.Api/Dockerfile
+    environment:
+      <<: [*jwt, *otel, *rabbitmq-conn]
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: 8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=quickorder_ordering;Username=postgres;Password=postgres
+      RabbitMq__Exchange: ordering.events
+      Services__CatalogApi: http://catalog-api:8080
+    ports:
+      - "5081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      catalog-api:
+        condition: service_started
+
+  delivery-api:
+    build:
+      context: .
+      dockerfile: src/Delivery/Delivery.Api/Dockerfile
+    environment:
+      <<: [*jwt, *otel, *rabbitmq-conn]
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: 8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=quickorder_delivery;Username=postgres;Password=postgres
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__Exchange: delivery.events
+    ports:
+      - "5082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  delivery-worker:
+    build:
+      context: .
+      dockerfile: src/Delivery/Delivery.Worker/Dockerfile
+    environment:
+      <<: [*jwt, *otel, *rabbitmq-conn]
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: 8080
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=quickorder_delivery;Username=postgres;Password=postgres
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__Exchange: delivery.events
+      OrderingExchange__Exchange: ordering.events
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      delivery-api:
+        condition: service_started
+
+  notification-api:
+    build:
+      context: .
+      dockerfile: src/Notification/Notification.Api/Dockerfile
+    environment:
+      <<: [*jwt, *otel, *rabbitmq-conn]
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: 8080
+      ConnectionStrings__Redis: redis:6379
+      RabbitMq__OrderingExchange: ordering.events
+      RabbitMq__DeliveryExchange: delivery.events
+    ports:
+      - "5083:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

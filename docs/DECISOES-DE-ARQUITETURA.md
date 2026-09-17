@@ -823,3 +823,97 @@ pra fazer `StartActivity` de fato criar atividades, sem precisar montar o pipeli
 completo do OpenTelemetry SDK só pra um teste de propagação. Vale registrar como
 lição: `ActivitySource` sem listener é um no-op silencioso, o tipo de bug que passa
 despercebido até alguém tentar testar o comportamento de verdade.
+
+---
+
+## Fase 9 — Docker Compose (orquestração completa)
+
+### 51. Um Postgres só, quatro bancos — não um container por serviço
+
+`docker/postgres-init.sql` roda no primeiro start do container `postgres` (via
+`/docker-entrypoint-initdb.d/`) e cria `quickorder_catalog`, `quickorder_ordering`,
+`quickorder_delivery` e `quickorder_identity` como bancos separados no mesmo servidor.
+
+**Por quê:** o isolamento que importa (cada serviço só enxerga seu próprio schema,
+nenhuma FK cruzando serviços, nenhuma query entre bancos) já existe no nível do banco,
+não do processo — rodar quatro containers Postgres não compraria isolamento adicional
+nenhum, só gastaria memória à toa numa stack de demonstração local. Um deploy real
+provavelmente daria a cada serviço uma instância gerenciada própria (RDS, Cloud SQL
+etc.); isso é uma simplificação proporcional à escala de um projeto de portfólio
+rodando em `docker compose`, documentada como tal em vez de apresentada como a escolha
+"certa" em qualquer escala.
+
+### 52. Jaeger all-in-one como back-end de traces, recebendo OTLP direto (sem collector)
+
+`Otel:OtlpEndpoint` de todo serviço aponta pra `http://jaeger:4317` — o Jaeger
+`all-in-one:1.58` já fala o protocolo OTLP gRPC nativamente
+(`COLLECTOR_OTLP_ENABLED=true`), então não existe um OpenTelemetry Collector
+intermediário na stack.
+
+**Por quê:** um Collector separado ganha sentido quando se quer processar/rotear
+telemetria antes do back-end (amostragem, múltiplos destinos, transformação de
+atributos) — nada disso é necessário aqui, e adicionar a peça só pra "ter a peça"
+seria a mesma cerimônia sem função já rejeitada no item 31. Jaeger aceitando OTLP
+direto prova exatamente a mesma cadeia de propagação (itens 47-49) com uma peça a
+menos na stack.
+
+### 53. Variáveis de ambiente com convenção `__` (double underscore) sobrescrevem `appsettings.json` sem tocar nele
+
+Nenhum `appsettings.json` foi alterado para o Compose. Cada serviço no
+`docker-compose.yml` recebe `ConnectionStrings__Postgres`, `RabbitMq__HostName: rabbitmq`,
+`ConnectionStrings__Redis: redis:6379`, `Otel__OtlpEndpoint: http://jaeger:4317` etc.
+como variáveis de ambiente — a convenção nativa do `Microsoft.Extensions.Configuration`
+pra endereçar uma seção aninhada sem precisar de um arquivo de config por ambiente.
+
+**Por quê:** os `appsettings.json` continuam corretos e usáveis pra rodar cada serviço
+localmente fora de container (`localhost` nas connection strings, exatamente como
+sempre foram) — o Compose é só mais uma fonte de configuração por cima, isolada do
+código-fonte. Trocar hostnames dentro do `appsettings.json` pra "docker" quebraria o
+fluxo de desenvolvimento local que todas as Fases anteriores dependeram (rodar cada
+serviço direto do `dotnet run`/IDE contra infraestrutura local).
+
+### 54. `depends_on` com `condition: service_healthy` para toda infraestrutura, `service_started` entre serviços de app
+
+Postgres, Redis e RabbitMQ têm `healthcheck` (`pg_isready`, `redis-cli ping`,
+`rabbitmq-diagnostics ping`) e todo serviço que depende deles usa
+`condition: service_healthy` — não só `depends_on` simples, que no Compose só espera o
+container *iniciar*, não ficar pronto pra aceitar conexões. Entre serviços de
+aplicação (ex.: `ordering-api` depende de `catalog-api`, `delivery-worker` depende de
+`delivery-api`), o `condition` é `service_started`, mais fraco de propósito.
+
+**Por quê a diferença:** a resiliência de reconexão que cada `BackgroundService`/
+`OutboxPublisher` já tem desde a Fase 3 (item 23, retry do laço inteiro com backoff)
+significa que um serviço de app não *precisa* que outro serviço de app já esteja
+totalmente pronto pra aceitar a primeira conexão — ele tenta, falha, espera e tenta de
+novo sozinho, o que de fato foi observado no primeiro `docker compose up`: o
+`notification-api` levou uma rejeição de conexão do RabbitMQ na largada (container
+ainda de pé mas o broker não tinha acabado de aceitar conexões) e se recuperou sozinho
+sem intervenção, exatamente o comportamento que aquele retry foi desenhado pra ter.
+Testcontainers/healthcheck geram esse mesmo tipo de corrida em qualquer stack local; a
+diferença é que aqui a robustez já existia desde três fases atrás, então o Compose só
+precisou subir a barra até `service_healthy` na infraestrutura (onde não há retry
+embutido do lado do cliente de banco/fila na inicialização) pra eliminar o pior caso.
+
+### 55. `ASPNETCORE_ENVIRONMENT=Development` em todo container — para acionar a migração automática
+
+Cada serviço aplica `dbContext.Database.MigrateAsync()` só quando
+`app.Environment.IsDevelopment()` (decisão da Fase 1, item 14). Setar
+`ASPNETCORE_ENVIRONMENT=Development` no Compose garante que os quatro bancos
+(`__EFMigrationsHistory` + tabelas) fiquem prontos no primeiro `docker compose up`,
+sem precisar rodar `dotnet ef database update` manualmente contra cada container.
+
+**Por quê:** o item 14 já registrava que isso seria substituído por uma migração
+explícita de pipeline de deploy "quando chegarmos à containerização" — mas o alvo
+desta fase é uma stack local reproduzível de portfólio, não um pipeline de produção;
+a migração automática continua sendo a escolha certa pra esse objetivo específico. A
+ressalva de produção do item 14 permanece válida e não foi revisitada aqui.
+
+**Verificação de ponta a ponta feita nesta fase:** `docker compose build` (6 imagens
+multi-stage) e `docker compose up -d` sobem os 13 containers (6 apps + Postgres +
+Redis + RabbitMQ + Jaeger + Prometheus + Grafana); os 4 bancos aparecem migrados
+(`\dt` confirma `__EFMigrationsHistory` + tabelas em cada um); os 6 `/metrics` HTTP
+respondem 200 e aparecem como `up` nos targets do Prometheus
+(`GET /api/v1/targets`); os consumidores do `notification-api` e do
+`delivery-worker` aparecem conectados e ativos na API de management do RabbitMQ
+(`GET /api/consumers`) depois de uma reconexão automática na largada. `docker compose
+down` encerra tudo sem erro.
