@@ -11,16 +11,28 @@ public sealed class OutboxMessage
     public int RetryCount { get; private set; }
     public DateTimeOffset? NextAttemptAtUtc { get; private set; }
 
+    /// <summary>The W3C traceparent of whatever operation (an HTTP request, a queue
+    /// message being handled) caused this event — captured at creation time, read
+    /// back by OutboxPublisher potentially seconds or minutes later, so the eventual
+    /// RabbitMQ publish still shows up as part of the same distributed trace instead
+    /// of starting a disconnected one. This is the "manual" in manual trace
+    /// propagation: nothing about the Outbox poll loop is part of any HTTP pipeline,
+    /// so nothing here happens automatically the way ASP.NET Core's own
+    /// instrumentation would.</summary>
+    public string? TraceParent { get; private set; }
+
     public const int MaxRetries = 5;
 
     private OutboxMessage() { }
 
-    public static OutboxMessage Create(Guid id, string type, string content, DateTimeOffset occurredOnUtc) => new()
+    public static OutboxMessage Create(
+        Guid id, string type, string content, DateTimeOffset occurredOnUtc, string? traceParent = null) => new()
     {
         Id = id,
         Type = type,
         Content = content,
         OccurredOnUtc = occurredOnUtc,
+        TraceParent = traceParent,
     };
 
     public void MarkProcessed(DateTimeOffset processedOnUtc)

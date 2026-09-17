@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Catalog.Domain.Common;
 using Catalog.Domain.Restaurants.Events;
@@ -34,6 +35,6 @@ public static class CatalogIntegrationEventMapper
         var routingKey = RoutingKey.For(integrationEvent.GetType());
         var content = JsonSerializer.Serialize(integrationEvent, integrationEvent.GetType());
 
-        return OutboxMessage.Create(Guid.NewGuid(), routingKey, content, domainEvent.OccurredOn);
+        return OutboxMessage.Create(Guid.NewGuid(), routingKey, content, domainEvent.OccurredOn, Activity.Current?.Id);
     }
 }
