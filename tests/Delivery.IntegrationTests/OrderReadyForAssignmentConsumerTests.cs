@@ -54,6 +54,36 @@ public sealed class OrderReadyForAssignmentConsumerTests(DeliveryWorkerFixture f
     }
 
     [Fact]
+    public async Task PublishingEvent_WithTraceParent_PropagatesTheSameTraceIdToTheOutgoingEvent()
+    {
+        var courier = await RegisterAndGoOnlineCourierAsync();
+        var orderId = Guid.NewGuid();
+        var restaurantId = Guid.NewGuid();
+
+        await using var subscriberConnection = await CreateConnectionAsync();
+        await using var subscriberChannel = await subscriberConnection.CreateChannelAsync();
+        var deliveryRoutingKey = RoutingKey.For<QuickOrder.Contracts.Delivery.CourierAssignedIntegrationEvent>();
+        await subscriberChannel.ExchangeDeclareAsync("delivery.events", ExchangeType.Topic, durable: true);
+        var queue = await subscriberChannel.QueueDeclareAsync(exclusive: true);
+        await subscriberChannel.QueueBindAsync(queue.QueueName, "delivery.events", deliveryRoutingKey);
+
+        // A synthetic traceparent, as if it came from Ordering's own OutboxPublisher
+        // span. Trace-id is the middle segment: 00-<32 hex trace-id>-<16 hex span-id>-01.
+        const string traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        var incomingTraceParent = $"00-{traceId}-00f067aa0ba902b7-01";
+
+        await PublishOrderReadyForAssignmentAsync(Guid.NewGuid(), orderId, restaurantId, incomingTraceParent);
+
+        var delivery = await WaitForDeliveryAsync(subscriberChannel, queue.QueueName, TimeSpan.FromSeconds(20));
+        delivery.BasicProperties.Headers.Should().ContainKey("traceparent");
+
+        var outgoingTraceParent = HeaderValueToString(delivery.BasicProperties.Headers!["traceparent"]);
+        outgoingTraceParent.Should().NotBeNull();
+        outgoingTraceParent!.Split('-')[1].Should().Be(traceId,
+            "the outgoing CourierAssignedIntegrationEvent should stay part of the same trace that started with the incoming OrderReadyForAssignmentIntegrationEvent");
+    }
+
+    [Fact]
     public async Task RedeliveringTheSameEvent_DoesNotCreateASecondAssignment()
     {
         var courier = await RegisterAndGoOnlineCourierAsync();
@@ -132,7 +162,8 @@ public sealed class OrderReadyForAssignmentConsumerTests(DeliveryWorkerFixture f
         Password = "guest",
     }.CreateConnectionAsync();
 
-    private async Task PublishOrderReadyForAssignmentAsync(Guid eventId, Guid orderId, Guid restaurantId)
+    private async Task PublishOrderReadyForAssignmentAsync(
+        Guid eventId, Guid orderId, Guid restaurantId, string? traceParent = null)
     {
         await using var connection = await CreateConnectionAsync();
         await using var channel = await connection.CreateChannelAsync();
@@ -141,11 +172,18 @@ public sealed class OrderReadyForAssignmentConsumerTests(DeliveryWorkerFixture f
         var integrationEvent = new OrderReadyForAssignmentIntegrationEvent(eventId, DateTimeOffset.UtcNow, orderId, restaurantId);
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(integrationEvent));
 
+        var properties = new BasicProperties();
+        if (traceParent is not null)
+            properties.Headers = new Dictionary<string, object?> { ["traceparent"] = traceParent };
+
         await channel.BasicPublishAsync(
-            "ordering.events", RoutingKey.For<OrderReadyForAssignmentIntegrationEvent>(), body);
+            "ordering.events", RoutingKey.For<OrderReadyForAssignmentIntegrationEvent>(), mandatory: false, properties, body);
     }
 
-    private static async Task<string> WaitForMessageAsync(IChannel channel, string queueName, TimeSpan timeout)
+    private static async Task<string> WaitForMessageAsync(IChannel channel, string queueName, TimeSpan timeout) =>
+        Encoding.UTF8.GetString((await WaitForDeliveryAsync(channel, queueName, timeout)).Body.ToArray());
+
+    private static async Task<BasicGetResult> WaitForDeliveryAsync(IChannel channel, string queueName, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
 
@@ -153,11 +191,19 @@ public sealed class OrderReadyForAssignmentConsumerTests(DeliveryWorkerFixture f
         {
             var result = await channel.BasicGetAsync(queueName, autoAck: true);
             if (result is not null)
-                return Encoding.UTF8.GetString(result.Body.ToArray());
+                return result;
 
             await Task.Delay(TimeSpan.FromMilliseconds(250));
         }
 
         throw new TimeoutException($"No message arrived on queue '{queueName}' within {timeout}.");
     }
+
+    private static string? HeaderValueToString(object? value) => value switch
+    {
+        null => null,
+        string s => s,
+        byte[] bytes => Encoding.UTF8.GetString(bytes),
+        _ => value.ToString(),
+    };
 }

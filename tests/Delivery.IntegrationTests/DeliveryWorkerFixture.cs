@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using Delivery.Application;
 using Delivery.Infrastructure;
+using Delivery.Infrastructure.Observability;
 using Delivery.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -28,11 +30,24 @@ public sealed class DeliveryWorkerFixture : IAsyncLifetime
         .Build();
 
     private IHost _host = null!;
+    private ActivityListener? _activityListener;
 
     public IServiceProvider Services => _host.Services;
 
     public async Task InitializeAsync()
     {
+        // ActivitySource.StartActivity returns null unless something is listening —
+        // normally that "something" is the OpenTelemetry SDK's TracerProvider
+        // (registered in Program.cs), which this in-process test host deliberately
+        // doesn't spin up. A minimal listener is enough to make DeliveryActivitySource
+        // actually create Activities so the trace-propagation test can observe them.
+        _activityListener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == DeliveryActivitySource.Name,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(_activityListener);
+
         await Task.WhenAll(_postgres.StartAsync(), _redis.StartAsync(), RabbitMq.StartAsync());
 
         var builder = Host.CreateApplicationBuilder();
@@ -66,6 +81,7 @@ public sealed class DeliveryWorkerFixture : IAsyncLifetime
     {
         await _host.StopAsync();
         _host.Dispose();
+        _activityListener?.Dispose();
         await _postgres.DisposeAsync();
         await _redis.DisposeAsync();
         await RabbitMq.DisposeAsync();
