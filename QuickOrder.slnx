@@ -13,6 +13,12 @@
     <Project Path="src/Delivery/Delivery.Infrastructure/Delivery.Infrastructure.csproj" />
     <Project Path="src/Delivery/Delivery.Worker/Delivery.Worker.csproj" />
   </Folder>
+  <Folder Name="/src/Identity/">
+    <Project Path="src/Identity/Identity.Api/Identity.Api.csproj" />
+    <Project Path="src/Identity/Identity.Application/Identity.Application.csproj" />
+    <Project Path="src/Identity/Identity.Domain/Identity.Domain.csproj" />
+    <Project Path="src/Identity/Identity.Infrastructure/Identity.Infrastructure.csproj" />
+  </Folder>
   <Folder Name="/src/Notification/">
     <Project Path="src/Notification/Notification.Api/Notification.Api.csproj" />
   </Folder>
@@ -30,6 +36,8 @@
     <Project Path="tests/Catalog.IntegrationTests/Catalog.IntegrationTests.csproj" />
     <Project Path="tests/Delivery.Domain.Tests/Delivery.Domain.Tests.csproj" />
     <Project Path="tests/Delivery.IntegrationTests/Delivery.IntegrationTests.csproj" />
+    <Project Path="tests/Identity.Domain.Tests/Identity.Domain.Tests.csproj" />
+    <Project Path="tests/Identity.IntegrationTests/Identity.IntegrationTests.csproj" />
     <Project Path="tests/Notification.IntegrationTests/Notification.IntegrationTests.csproj" />
     <Project Path="tests/Ordering.Domain.Tests/Ordering.Domain.Tests.csproj" />
     <Project Path="tests/Ordering.IntegrationTests/Ordering.IntegrationTests.csproj" />
