@@ -11,16 +11,24 @@ public sealed class OutboxMessage
     public int RetryCount { get; private set; }
     public DateTimeOffset? NextAttemptAtUtc { get; private set; }
 
+    /// <summary>The W3C traceparent of whatever caused this event, captured at
+    /// creation time so OutboxPublisher can resume that trace even though the actual
+    /// RabbitMQ publish happens later, disconnected from any HTTP request pipeline —
+    /// see QuickOrder.Contracts.Messaging.TraceContextPropagation.</summary>
+    public string? TraceParent { get; private set; }
+
     public const int MaxRetries = 5;
 
     private OutboxMessage() { }
 
-    public static OutboxMessage Create(Guid id, string type, string content, DateTimeOffset occurredOnUtc) => new()
+    public static OutboxMessage Create(
+        Guid id, string type, string content, DateTimeOffset occurredOnUtc, string? traceParent = null) => new()
     {
         Id = id,
         Type = type,
         Content = content,
         OccurredOnUtc = occurredOnUtc,
+        TraceParent = traceParent,
     };
 
     public void MarkProcessed(DateTimeOffset processedOnUtc)

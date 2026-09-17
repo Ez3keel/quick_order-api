@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Ordering.Domain.Common;
 using Ordering.Domain.Orders.Events;
@@ -32,6 +33,6 @@ public static class OrderingIntegrationEventMapper
         var routingKey = RoutingKey.For(integrationEvent.GetType());
         var content = JsonSerializer.Serialize(integrationEvent, integrationEvent.GetType());
 
-        return OutboxMessage.Create(Guid.NewGuid(), routingKey, content, domainEvent.OccurredOn);
+        return OutboxMessage.Create(Guid.NewGuid(), routingKey, content, domainEvent.OccurredOn, Activity.Current?.Id);
     }
 }
