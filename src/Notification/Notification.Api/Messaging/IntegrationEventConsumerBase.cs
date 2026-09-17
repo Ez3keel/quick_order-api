@@ -1,9 +1,12 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Notification.Api.Observability;
 using QuickOrder.Contracts;
+using QuickOrder.Contracts.Messaging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -97,6 +100,10 @@ public abstract class IntegrationEventConsumerBase<TEvent>(
                 await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, stoppingToken);
                 return;
             }
+
+            var parentContext = TraceContextPropagation.Extract(delivery.BasicProperties.Headers);
+            using var activity = NotificationActivitySource.Instance.StartActivity(
+                $"{QueueName} process", ActivityKind.Consumer, parentContext);
 
             await HandleAsync(integrationEvent, stoppingToken);
             await channel.BasicAckAsync(delivery.DeliveryTag, multiple: false, stoppingToken);
