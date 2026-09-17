@@ -730,3 +730,96 @@ breaker) está montada corretamente. Contra um servidor real, um erro de configu
 do pipeline (por exemplo, `ShouldHandle` não capturando `HttpRequestException`)
 apareceria como um teste falhando de verdade, não como uma configuração nunca
 exercitada.
+
+---
+
+## Fase 8 — Observabilidade distribuída
+
+### 46. Duas exportações separadas: métricas via Prometheus (pull), traces via OTLP (push)
+
+Todo serviço HTTP expõe `/metrics` no formato Prometheus (`OpenTelemetry.Exporter.
+Prometheus.AspNetCore`, um servidor Prometheus real faria scrape disso). Traces vão
+por `OtlpExporter`, configurável via `Otel:OtlpEndpoint` — se a config estiver vazia,
+o exportador de trace simplesmente não é registrado; se estiver configurada mas nada
+estiver escutando (nenhum collector rodando localmente), o SDK do OpenTelemetry só
+loga a falha de export em background e segue, sem derrubar a aplicação.
+
+**Por quê modelos diferentes pra cada sinal:** é a convenção real do ecossistema
+Prometheus/OpenTelemetry, não uma escolha arbitrária deste projeto — Prometheus foi
+desenhado pra fazer scrape (puxar métricas periodicamente de um endpoint conhecido);
+traces são eventos de alta cardinalidade e alto volume, empurrados assincronamente
+pro backend (Jaeger/Tempo/etc. via um collector OTLP) assim que terminam. Forçar os
+dois pelo mesmo modelo seria lutar contra a ferramenta.
+
+### 47. Propagação manual de trace context através do RabbitMQ — e por que "manual" é o ponto
+
+HTTP ganha tracing distribuído de graça: a instrumentação do ASP.NET Core/HttpClient
+já sabe ler e escrever o header W3C `traceparent`. RabbitMQ não tem instrumentação
+embutida pra isso — uma mensagem é só bytes e um dicionário de headers, então quem
+publica precisa guardar o contexto de trace atual manualmente, e quem consome precisa
+ler de volta manualmente e religar o novo span como filho daquele contexto.
+`QuickOrder.Contracts.Messaging.TraceContextPropagation` faz isso (`Inject`/`Extract`),
+compartilhado entre serviços pela mesma razão do `RoutingKey` (item 24): é formato de
+mensagem na fila, não lógica de negócio — produtor e consumidor precisam concordar no
+formato exato do header.
+
+### 48. O trace context é guardado na própria linha do Outbox, não só no header do RabbitMQ
+
+Cada evento de domínio, ao virar `OutboxMessage` (dentro do `SaveChangesAsync` do
+`DbContext`), captura `Activity.Current?.Id` no momento da criação — que normalmente é
+o span da requisição HTTP que disparou a mudança. Só que o `OutboxPublisher` publica
+essa linha segundos ou minutos depois, rodando num `BackgroundService` sem nenhuma
+relação com aquele pipeline HTTP — se o publisher só usasse `Activity.Current` no
+momento de publicar, ele leria `null` (ou o contexto errado) e cada publish criaria um
+trace novo e desconectado do request que o originou.
+
+Guardando o `traceparent` como uma coluna (`OutboxMessage.TraceParent`), o
+`OutboxPublisher` reconstrói o `ActivityContext` na hora de publicar
+(`ActivityContext.TryParse`) e usa isso como pai do span de "publish" que ele cria —
+span esse cujo contexto, por sua vez, é injetado nos headers do RabbitMQ pro próximo
+consumidor continuar a cadeia. Essa é literalmente a definição de propagação manual:
+nada nisso acontece por instrumentação automática, cada hop (HTTP → Outbox → fila →
+consumer → Outbox → fila → consumer) exige uma linha explícita de código carregando o
+contexto adiante.
+
+### 49. O caso mais interessante: Delivery consome E publica, e o trace atravessa os dois
+
+`OrderReadyForAssignmentConsumer` extrai o `traceparent` do header da mensagem que
+chega do Ordering e abre seu próprio span (`ActivityKind.Consumer`) como filho dele.
+Enquanto esse span está ativo, `AssignCourierCommandHandler` roda, grava a
+`DeliveryAssignment`, e o `DeliveryDbContext.SaveChangesAsync` mapeia o
+`CourierAssignedEvent` resultante pra um `OutboxMessage` — capturando
+`Activity.Current?.Id`, que agora é o span do *consumer*, não mais o span HTTP
+original do Ordering. Quando o `OutboxPublisher` do Delivery eventualmente publica
+esse evento, ele usa esse `traceparent` como pai — encadeando: `PlaceOrder` (HTTP,
+Ordering) → publish `OrderReadyForAssignment` (Ordering) → consume + processar
+(Delivery) → publish `CourierAssigned` (Delivery) → consume (Notification) → push
+SignalR, tudo como **um único trace conectado**, atravessando três processos e duas
+travessias de fila, sem nenhum deles saber previamente que fariam parte da mesma
+requisição original.
+
+Testado de ponta a ponta em
+`PublishingEvent_WithTraceParent_PropagatesTheSameTraceIdToTheOutgoingEvent`: publica
+um evento com um `traceparent` sintético, espera a mensagem de saída, e confere que o
+trace-id (o segmento do meio do `traceparent`) é idêntico nos dois — a prova de que a
+cadeia realmente se mantém através do Outbox e da fila, não só que o código "tentaria"
+propagar.
+
+### 50. `ActivitySource.StartActivity` retorna `null` sem um listener — e isso quebrou um teste
+
+`Delivery.IntegrationTests` usa `DeliveryWorkerFixture`, que sobe um `IHost` genérico
+sem registrar o SDK completo do OpenTelemetry (o Worker de teste não é o
+`Program.cs` real). Sem um `TracerProvider` (ou qualquer `ActivityListener`) inscrito
+na fonte `"QuickOrder.Delivery"`, `ActivitySource.StartActivity(...)` retorna `null`
+silenciosamente — nenhuma exceção, só nenhuma atividade sendo criada, e por
+consequência nenhum header `traceparent` sendo injetado. `TraceContextPropagation.
+Inject` já tolera isso (`activity is null` → não faz nada), então o sintoma foi um
+teste falhando com "esperava a mensagem carregar o header, mas ele não existia" — não
+um crash óbvio.
+
+**Correção:** `DeliveryWorkerFixture` registra um `ActivityListener` mínimo
+(`ShouldListenTo` pro nome da fonte, `Sample` retornando `AllData`) — o suficiente
+pra fazer `StartActivity` de fato criar atividades, sem precisar montar o pipeline
+completo do OpenTelemetry SDK só pra um teste de propagação. Vale registrar como
+lição: `ActivitySource` sem listener é um no-op silencioso, o tipo de bug que passa
+despercebido até alguém tentar testar o comportamento de verdade.
