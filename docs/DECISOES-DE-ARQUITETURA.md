@@ -544,3 +544,106 @@ simulado — não interage com `IHubContext` diretamente nem faz mock do Hub.
 (`Clients.Group(...)`) realmente entrega pro cliente certo, nem que a integração
 consumer → Hub → transporte SignalR funciona de ponta a ponta — é exatamente o tipo de
 "colagem" entre peças que só aparece testando o sistema de verdade.
+
+---
+
+## Fase 6 — Segurança (Identity, JWT, rate limiting)
+
+### 36. `Identity.Api`: sexto serviço, dono do login — chave de assinatura compartilhada só por configuração
+
+Criamos `Identity.Api` (com `Identity.Domain`/`Application`/`Infrastructure` completos,
+mesmo padrão dos outros) para registro, login e emissão de tokens. Todo outro serviço
+(Catalog, Ordering, Delivery, Notification) valida o JWT localmente, com uma cópia do
+mesmo `Jwt:SigningKey`/`Issuer`/`Audience` no seu próprio `appsettings.json` — nenhum
+serviço chama o Identity de volta pra validar um token.
+
+**Por quê:** isso é o mesmo princípio do item 20 (contratos de integração) aplicado a
+segurança — o que é compartilhado é o *formato* (aqui, a chave simétrica e as
+claims), nunca código. Uma chave HMAC simétrica repetida em N arquivos de config é a
+solução mais simples que funciona no tamanho deste projeto; um sistema com pipelines
+de deploy de verdade independentes por serviço usaria assinatura assimétrica (RS256) e
+um endpoint JWKS publicado pelo Identity, pra nunca precisar distribuir um segredo
+compartilhado — deliberadamente fora de escopo aqui, documentado em vez de fingido.
+
+### 37. Refresh token: hash rápido (SHA-256), não hash lento (PBKDF2) — e por quê são coisas diferentes
+
+`Pbkdf2PasswordHasher` (senha) usa 100.000 iterações de PBKDF2-HMAC-SHA256;
+`Sha256RefreshTokenHasher` (refresh token) usa um único SHA-256 direto.
+
+**Por quê parecem a mesma coisa mas não são:** uma senha precisa resistir a um
+atacante *adivinhando* o valor original a partir do hash — por isso o hash de senha
+precisa ser lento de propósito (cada tentativa de adivinhação custa caro). Um refresh
+token já é um valor aleatório de alta entropia (64 bytes de `RandomNumberGenerator`)
+— ninguém vai "adivinhar" um refresh token, o hash aqui existe só pra não deixar o
+valor utilizável em texto puro se o banco vazar. Usar PBKDF2 lento num refresh token
+seria desperdiçar CPU sem ganhar segurança nenhuma; usar SHA-256 rápido numa senha
+seria uma vulnerabilidade real. A tabela de decisão certa é "o que esse hash precisa
+resistir", não "hash é hash".
+
+### 38. Rotação de refresh token com detecção de reuso (resposta a roubo)
+
+Cada `POST /api/auth/refresh` consome o token apresentado (marca `RevokedAt`) e emite
+um par novo — um refresh token serve pra uma única troca. Se um token **já revogado**
+for apresentado de novo, isso é o sinal clássico de roubo (alguém reproduzindo um
+token que o cliente legítimo já trocou por um mais novo): a resposta é revogar
+**todos** os outros tokens ativos daquele usuário, não só negar aquela requisição —
+testado em `Refresh_WithAlreadyRotatedToken_RevokesTheWholeChainAndRejectsFurtherUse`.
+
+**Por quê a distinção entre "expirado" e "já revogado" importa:** um token expirado
+naturalmente não é evidência de nada — só passou o tempo. Um token *revogado* sendo
+reapresentado só acontece se alguém tem uma cópia de um token que não devia ter (ou o
+cliente legítimo tentou reusar por engano, um risco aceitável face ao ganho de
+segurança). `RefreshToken.RevokedAt is not null` é exatamente esse sinal.
+
+### 39. Rate limiting só nos endpoints de auth, particionado por IP, limite configurável
+
+`Identity.Api` usa `AddPolicy("auth", ...)` com `RateLimitPartition.GetFixedWindowLimiter`
+particionado pelo IP do chamador (não um balde global compartilhado — isso importa:
+sem particionar, um único cliente ocupado esgotaria o limite pra todo mundo tentando
+logar). Só `/register`, `/login` e `/refresh` têm o limite; `/revoke` (logout) não.
+`PermitLimit`/`WindowSeconds` vêm de configuração, não hardcoded — os testes de
+integração elevam o limite pros testes funcionais (que fazem várias chamadas
+sequenciais no mesmo `HttpClient`) e um teste dedicado (`RateLimitingTests`, com sua
+própria instância de fábrica) mantém o limite baixo especificamente pra provar que o
+429 acontece de verdade.
+
+**Por quê só nesses endpoints:** rate limiting é uma defesa contra abuso de um
+endpoint específico (aqui, força bruta de credenciais) — aplicar globalmente em toda
+rota da API misturaria essa preocupação com throttling de tráfego geral (que é um
+problema diferente, resolvido de outro jeito, tipicamente num API gateway).
+
+### 40. `PlaceOrderRequest` não tem mais `CustomerId` — vem da claim do JWT
+
+Antes desta fase, `PlaceOrderRequest` recebia `CustomerId` no corpo. Agora o Ordering
+API extrai o id do usuário autenticado (`ClaimTypes.NameIdentifier`) e o usa
+diretamente — o campo desapareceu do contrato HTTP.
+
+**Por quê:** deixar o cliente informar de quem é o pedido é uma falha de autorização
+clássica (IDOR) — bastava trocar um Guid no payload pra criar um pedido em nome de
+outra pessoa. O JWT já prova quem está chamando; usar esse valor em vez de confiar no
+corpo da requisição é a correção, não um detalhe.
+
+### 41. Autorização por papel (role), com checagem de posse só onde já era barato fazer
+
+Cada serviço usa `[Authorize(Roles = "...")]` nos endpoints de escrita:
+`RestaurantOwner` no Catalog (cadastrar restaurante, mexer em cardápio);
+`Customer`/`RestaurantOwner`/`Courier` no Ordering, um por transição de estado;
+`Courier` no Delivery. Leitura pública (listar/ver cardápio) continua anônima.
+
+Além do papel, o `OrdersController.GetById` do Ordering confere posse: um chamador
+com papel `Customer` só vê pedidos onde `order.CustomerId` bate com o próprio id do
+token (senão, 403) — porque o DTO retornado já tinha esse dado, o que tornou a
+checagem praticamente grátis. Já o `CouriersController` do Delivery e o
+`SubscribeToOrder` do Notification **não** fazem essa checagem: o entregador é
+cadastrado com um id gerado pelo próprio Delivery, sem vínculo hoje com o `UserId` do
+Identity, e validar "esse pedido pertence a esse cliente" dentro do Hub do
+Notification exigiria uma chamada de volta pro Ordering que o Hub não tem. Esses dois
+gaps ficam documentados deliberadamente em vez de fingidos como resolvidos — dá pra
+perceber o padrão: sempre que a checagem de posse exigia um dado que o serviço já
+tinha na mão, ela foi feita; quando exigia uma nova integração entre serviços, ficou
+registrada como próximo passo em vez de forçada com um atalho frágil.
+
+`SubscribeToCourier`, porém, teve a checagem feita: nesse caso o `courierId` do grupo
+*é* comparável à claim do próprio token (mesma convenção usada em Delivery — ver
+`CouriersAuthorizationTests`), então recusar com `HubException` quando não bate custou
+poucas linhas e fechou um IDOR real na assinatura de grupo do entregador.
