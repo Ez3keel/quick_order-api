@@ -7,7 +7,11 @@
     <Project Path="src/Catalog/Catalog.Infrastructure/Catalog.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/src/Delivery/">
+    <Project Path="src/Delivery/Delivery.Api/Delivery.Api.csproj" />
+    <Project Path="src/Delivery/Delivery.Application/Delivery.Application.csproj" />
     <Project Path="src/Delivery/Delivery.Domain/Delivery.Domain.csproj" />
+    <Project Path="src/Delivery/Delivery.Infrastructure/Delivery.Infrastructure.csproj" />
+    <Project Path="src/Delivery/Delivery.Worker/Delivery.Worker.csproj" />
   </Folder>
   <Folder Name="/src/Ordering/">
     <Project Path="src/Ordering/Ordering.Api/Ordering.Api.csproj" />
@@ -22,6 +26,7 @@
     <Project Path="tests/Catalog.Domain.Tests/Catalog.Domain.Tests.csproj" />
     <Project Path="tests/Catalog.IntegrationTests/Catalog.IntegrationTests.csproj" />
     <Project Path="tests/Delivery.Domain.Tests/Delivery.Domain.Tests.csproj" />
+    <Project Path="tests/Delivery.IntegrationTests/Delivery.IntegrationTests.csproj" />
     <Project Path="tests/Ordering.Domain.Tests/Ordering.Domain.Tests.csproj" />
     <Project Path="tests/Ordering.IntegrationTests/Ordering.IntegrationTests.csproj" />
   </Folder>
