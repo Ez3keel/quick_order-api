@@ -24,6 +24,9 @@ public sealed class NotificationApiFactory : WebApplicationFactory<Notification.
         builder.UseSetting("RabbitMq:Password", "guest");
         builder.UseSetting("RabbitMq:OrderingExchange", "ordering.events");
         builder.UseSetting("RabbitMq:DeliveryExchange", "delivery.events");
+        builder.UseSetting("Jwt:Issuer", "quickorder-identity");
+        builder.UseSetting("Jwt:Audience", "quickorder");
+        builder.UseSetting("Jwt:SigningKey", TestJwtTokenFactory.SigningKey);
     }
 
     public async Task InitializeAsync()

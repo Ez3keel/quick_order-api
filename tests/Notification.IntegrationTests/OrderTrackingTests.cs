@@ -21,7 +21,7 @@ public sealed class OrderTrackingTests(NotificationApiFactory factory) : IClassF
     public async Task OrderStatusChanged_IsPushedToClientsSubscribedToThatOrder()
     {
         var orderId = Guid.NewGuid();
-        await using var connection = await ConnectAsync();
+        await using var connection = await ConnectAsync("Customer", Guid.NewGuid());
 
         var received = new TaskCompletionSource<JsonElement>();
         connection.On<JsonElement>("OrderStatusChanged", payload => received.TrySetResult(payload));
@@ -41,7 +41,9 @@ public sealed class OrderTrackingTests(NotificationApiFactory factory) : IClassF
         var orderId = Guid.NewGuid();
         var courierId = Guid.NewGuid();
         var assignmentId = Guid.NewGuid();
-        await using var connection = await ConnectAsync();
+        // Connects "as" the courier who's about to be assigned — SubscribeToCourier
+        // now enforces that callers can only join their own courier group.
+        await using var connection = await ConnectAsync("Courier", courierId);
 
         var orderNotified = new TaskCompletionSource<JsonElement>();
         var courierNotified = new TaskCompletionSource<JsonElement>();
@@ -66,7 +68,7 @@ public sealed class OrderTrackingTests(NotificationApiFactory factory) : IClassF
     {
         var orderId = Guid.NewGuid();
         var eventId = Guid.NewGuid();
-        await using var connection = await ConnectAsync();
+        await using var connection = await ConnectAsync("Customer", Guid.NewGuid());
 
         var receivedCount = 0;
         var firstReceived = new TaskCompletionSource();
@@ -88,7 +90,7 @@ public sealed class OrderTrackingTests(NotificationApiFactory factory) : IClassF
         receivedCount.Should().Be(1);
     }
 
-    private async Task<HubConnection> ConnectAsync()
+    private async Task<HubConnection> ConnectAsync(string role, Guid userId)
     {
         _ = factory.Server; // ensure the host is built
 
@@ -96,6 +98,7 @@ public sealed class OrderTrackingTests(NotificationApiFactory factory) : IClassF
             .WithUrl("http://localhost/hubs/order-tracking", options =>
             {
                 options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
+                options.AccessTokenProvider = () => Task.FromResult<string?>(TestJwtTokenFactory.Create(role, userId));
             })
             .Build();
 
