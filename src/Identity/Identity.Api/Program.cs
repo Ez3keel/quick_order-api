@@ -5,6 +5,10 @@ using Identity.Infrastructure;
 using Identity.Infrastructure.Persistence;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -41,6 +45,30 @@ builder.Services.AddRateLimiter(options =>
         }));
 });
 
+// No manual RabbitMQ span here — Identity doesn't publish or consume any messages
+// (it's a pure HTTP service). ASP.NET Core/HttpClient/EF Core instrumentation cover
+// everything this service does.
+const string serviceName = "quickorder-identity-api";
+var otlpEndpoint = builder.Configuration["Otel:OtlpEndpoint"];
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService(serviceName))
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddEntityFrameworkCoreInstrumentation();
+
+        if (!string.IsNullOrEmpty(otlpEndpoint))
+            tracing.AddOtlpExporter(otlp => otlp.Endpoint = new Uri(otlpEndpoint));
+    })
+    .WithMetrics(metrics => metrics
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddRuntimeInstrumentation()
+        .AddPrometheusExporter());
+
 var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
@@ -59,6 +87,7 @@ app.UseHttpsRedirection();
 app.UseRateLimiter();
 
 app.MapControllers();
+app.MapPrometheusScrapingEndpoint();
 
 app.Run();
 
