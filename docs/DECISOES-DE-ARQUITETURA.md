@@ -469,3 +469,78 @@ certos provaria que o código *tentou* fazer a coisa certa; publicar de verdade 
 esperar a mensagem emergir do outro lado do RabbitMQ prova que a topologia de filas
 (exchange, bindings, TTL, dead-letter routing) está configurada corretamente — é
 exatamente o tipo de erro de configuração que só aparece contra um broker real.
+
+---
+
+## Fase 5 — Notification Service (SignalR)
+
+### 31. Notification não tem Domain nem Postgres — e isso é deliberado, não preguiça
+
+Diferente de Catalog/Ordering/Delivery, `Notification.Api` é um único projeto sem
+`Notification.Domain` nem `Notification.Application` separados, e sem banco próprio.
+
+**Por quê:** os outros serviços têm modelo de domínio porque têm invariantes de
+negócio pra proteger (um pedido não pode pular de `Received` pra `Delivered`, um
+entregador não pode ser reservado duas vezes). Notification não decide nada — ele só
+traduz "chegou um evento" em "empurra uma mensagem pro grupo certo do SignalR". Criar
+`Notification.Domain`/`Notification.Application` vazios só pra manter a simetria com
+os outros serviços seria cerimônia sem função; a estrutura de um serviço deveria
+refletir a complexidade real dele, não um template copiado. Pelo mesmo motivo, não há
+Postgres aqui: não existe nenhum agregado que precise sobreviver a um restart deste
+serviço (se ele cair, os clientes reconectam e resubscrevem; nenhum estado de negócio
+mora aqui).
+
+### 32. Grupos do SignalR nomeados por convenção (`order-{id}`, `courier-{id}`), sem catálogo central
+
+`OrderTrackingHub` deixa qualquer cliente entrar em qualquer grupo
+(`SubscribeToOrder`/`SubscribeToCourier`) sem checar se ele "tem permissão" de ver
+aquele pedido — não existe checagem de autorização aqui.
+
+**Por quê:** autorização (validar que o cliente conectado é de fato o dono do pedido
+ou o entregador designado) é responsabilidade de quem emite o token/sessão que o
+cliente usa pra conectar — isso é a Fase 6 (JWT), que ainda não existe. Documentar essa
+lacuna explicitamente evita a ambiguidade de "esqueceram" vs. "ainda não chegou lá":
+o Hub de hoje é deliberadamente aberto, e ganha autorização por conexão assim que o
+JWT existir (`[Authorize]` no Hub + validar claims contra o grupo pedido).
+
+### 33. Redis faz dois papéis nesse serviço: backplane do SignalR e deduplicador de eventos
+
+`AddStackExchangeRedis` conecta o SignalR num backplane Redis (pra múltiplas réplicas
+deste serviço compartilharem a lista de quem está conectado a qual grupo).
+Separadamente, `RedisEventDeduplicator` usa `SETNX` com TTL de 1h como guarda de
+idempotência, no lugar da tabela `ProcessedMessages` que Delivery usa (Postgres).
+
+**Por quê a idempotência aqui é mais barata que a do Delivery:** lá, processar a
+mesma mensagem duas vezes reservaria um entregador duas vezes — um bug de correção,
+por isso precisa da garantia forte de uma transação com o Postgres. Aqui, empurrar a
+mesma notificação duas vezes é, na pior hipótese, o cliente ver "pedido saiu pra
+entrega" piscar duas vezes — incômodo de UX, não inconsistência de dados. Uma garantia
+"quase sempre" via TTL do Redis é proporcional ao risco real.
+
+### 34. Consumidores deste serviço não têm fila de delay nem DLQ — só nack-and-requeue
+
+`IntegrationEventConsumerBase` (compartilhada pelos dois consumers deste serviço, já
+que a forma é idêntica — declarar fila, consumir, verificar dedup, empurrar pro Hub) faz
+nack com `requeue: true` na falha, sem a topologia de retry-com-delay/DLQ que o
+`OrderReadyForAssignmentConsumer` do Delivery tem.
+
+**Por quê:** a topologia de delay+DLQ existe pra evitar reprocessar uma mensagem
+"presa" em loop apertado contra um recurso caro (Postgres, um courier real sendo
+reservado). Aqui a "ação" de processar é só um `SendAsync` do SignalR — barata,
+idempotente por natureza (empurrar de novo não corrompe nada), e sem custo real em
+reprocessar rapidamente. Adicionar a mesma máquina de retry aqui seria complexidade
+sem benefício proporcional — mesma filosofia do item 26 sobre proporcionalidade de
+resiliência ao risco real da falha.
+
+### 35. Teste de integração usa um `HubConnection` de verdade contra o `TestServer`
+
+`OrderTrackingTests` conecta um `Microsoft.AspNetCore.SignalR.Client.HubConnection`
+real usando `TestServer.CreateHandler()` do próprio `WebApplicationFactory`, publica
+eventos de verdade no RabbitMQ, e espera a mensagem chegar via WebSocket/long-polling
+simulado — não interage com `IHubContext` diretamente nem faz mock do Hub.
+
+**Por quê:** um mock de `IHubContext<OrderTrackingHub>` provaria que o consumer chamou
+`SendAsync` com os parâmetros certos, mas não provaria que o roteamento de grupo
+(`Clients.Group(...)`) realmente entrega pro cliente certo, nem que a integração
+consumer → Hub → transporte SignalR funciona de ponta a ponta — é exatamente o tipo de
+"colagem" entre peças que só aparece testando o sistema de verdade.
