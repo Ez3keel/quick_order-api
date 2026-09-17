@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -19,7 +20,16 @@ namespace Ordering.IntegrationTests;
 /// </summary>
 public sealed class OutboxPublishingTests(OrderingApiFactory factory) : IClassFixture<OrderingApiFactory>
 {
-    private readonly HttpClient _client = factory.CreateClient();
+    private readonly HttpClient _customerClient = CreateClient(factory, "Customer");
+    private readonly HttpClient _restaurantClient = CreateClient(factory, "RestaurantOwner");
+
+    private static HttpClient CreateClient(OrderingApiFactory factory, string role)
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", TestJwtTokenFactory.Create(role, Guid.NewGuid()));
+        return client;
+    }
 
     [Fact]
     public async Task MarkingOrderReadyForAssignment_PublishesIntegrationEventToRabbitMq()
@@ -46,13 +56,12 @@ public sealed class OutboxPublishingTests(OrderingApiFactory factory) : IClassFi
             restaurantId, "Burger House", IsOpen: true,
             [new CatalogMenuItemSnapshot(menuItemId, "X-Burger", 19.90m, "BRL", IsAvailable: true)]));
 
-        var placeResponse = await _client.PostAsJsonAsync(
-            "/api/orders",
-            new PlaceOrderRequest(Guid.NewGuid(), restaurantId, [new PlaceOrderRequestItem(menuItemId, 1)]));
+        var placeResponse = await _customerClient.PostAsJsonAsync(
+            "/api/orders", new PlaceOrderRequest(restaurantId, [new PlaceOrderRequestItem(menuItemId, 1)]));
         var order = await placeResponse.Content.ReadFromJsonAsync<OrderDto>();
 
-        await _client.PostAsync($"/api/orders/{order!.Id}/start-preparing", null);
-        await _client.PostAsync($"/api/orders/{order.Id}/mark-ready-for-assignment", null);
+        await _restaurantClient.PostAsync($"/api/orders/{order!.Id}/start-preparing", null);
+        await _restaurantClient.PostAsync($"/api/orders/{order.Id}/mark-ready-for-assignment", null);
 
         var payload = await WaitForMessageAsync(channel, queue.QueueName, TimeSpan.FromSeconds(15));
 

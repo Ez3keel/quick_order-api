@@ -27,6 +27,9 @@ public sealed class OrderingApiFactory : WebApplicationFactory<Ordering.Api.Prog
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:Postgres", _postgres.GetConnectionString());
         builder.UseSetting("Services:CatalogApi", "http://localhost");
+        builder.UseSetting("Jwt:Issuer", "quickorder-identity");
+        builder.UseSetting("Jwt:Audience", "quickorder");
+        builder.UseSetting("Jwt:SigningKey", TestJwtTokenFactory.SigningKey);
         builder.UseSetting("RabbitMq:HostName", RabbitMq.Hostname);
         builder.UseSetting("RabbitMq:Port", RabbitMq.GetMappedPublicPort(5672).ToString());
         builder.UseSetting("RabbitMq:UserName", "guest");
