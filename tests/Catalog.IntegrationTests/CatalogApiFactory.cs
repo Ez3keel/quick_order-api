@@ -34,6 +34,9 @@ public sealed class CatalogApiFactory : WebApplicationFactory<Catalog.Api.Progra
         builder.UseSetting("RabbitMq:Port", RabbitMq.GetMappedPublicPort(5672).ToString());
         builder.UseSetting("RabbitMq:UserName", "guest");
         builder.UseSetting("RabbitMq:Password", "guest");
+        builder.UseSetting("Jwt:Issuer", "quickorder-identity");
+        builder.UseSetting("Jwt:Audience", "quickorder");
+        builder.UseSetting("Jwt:SigningKey", TestJwtTokenFactory.SigningKey);
     }
 
     public async Task InitializeAsync()

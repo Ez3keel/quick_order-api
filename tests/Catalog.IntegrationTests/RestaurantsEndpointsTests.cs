@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Catalog.Api.Contracts;
 using Catalog.Application.Restaurants.Dtos;
@@ -8,7 +9,15 @@ namespace Catalog.IntegrationTests;
 
 public sealed class RestaurantsEndpointsTests(CatalogApiFactory factory) : IClassFixture<CatalogApiFactory>
 {
-    private readonly HttpClient _client = factory.CreateClient();
+    private readonly HttpClient _client = CreateAuthenticatedClient(factory);
+
+    private static HttpClient CreateAuthenticatedClient(CatalogApiFactory factory)
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", TestJwtTokenFactory.Create("RestaurantOwner"));
+        return client;
+    }
 
     [Fact]
     public async Task Register_ThenGetById_ReturnsTheCreatedRestaurant()

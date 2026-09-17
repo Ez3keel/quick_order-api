@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -19,7 +20,15 @@ namespace Catalog.IntegrationTests;
 /// </summary>
 public sealed class OutboxPublishingTests(CatalogApiFactory factory) : IClassFixture<CatalogApiFactory>
 {
-    private readonly HttpClient _client = factory.CreateClient();
+    private readonly HttpClient _client = CreateAuthenticatedClient(factory);
+
+    private static HttpClient CreateAuthenticatedClient(CatalogApiFactory factory)
+    {
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", TestJwtTokenFactory.Create("RestaurantOwner"));
+        return client;
+    }
 
     [Fact]
     public async Task ChangingMenuItemPrice_PublishesIntegrationEventToRabbitMq()

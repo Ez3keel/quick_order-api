@@ -6,6 +6,7 @@ using Catalog.Application.Restaurants.Dtos;
 using Catalog.Application.Restaurants.Queries.GetRestaurantById;
 using Catalog.Application.Restaurants.Queries.ListRestaurants;
 using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Catalog.Api.Controllers;
@@ -15,6 +16,7 @@ namespace Catalog.Api.Controllers;
 public sealed class RestaurantsController(ISender sender) : ControllerBase
 {
     [HttpPost]
+    [Authorize(Roles = "RestaurantOwner")]
     [ProducesResponseType<RestaurantDto>(StatusCodes.Status201Created)]
     public async Task<ActionResult<RestaurantDto>> Register(
         RegisterRestaurantRequest request, CancellationToken cancellationToken)
@@ -41,6 +43,7 @@ public sealed class RestaurantsController(ISender sender) : ControllerBase
     }
 
     [HttpPost("{id:guid}/menu-items")]
+    [Authorize(Roles = "RestaurantOwner")]
     [ProducesResponseType<MenuItemDto>(StatusCodes.Status201Created)]
     public async Task<ActionResult<MenuItemDto>> AddMenuItem(
         Guid id, AddMenuItemRequest request, CancellationToken cancellationToken)
@@ -51,6 +54,7 @@ public sealed class RestaurantsController(ISender sender) : ControllerBase
     }
 
     [HttpPut("{id:guid}/menu-items/{menuItemId:guid}/price")]
+    [Authorize(Roles = "RestaurantOwner")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> ChangeMenuItemPrice(
         Guid id, Guid menuItemId, ChangeMenuItemPriceRequest request, CancellationToken cancellationToken)
