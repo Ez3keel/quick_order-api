@@ -23,7 +23,8 @@ public static class DependencyInjection
             ?? throw new InvalidOperationException("Setting 'Services:CatalogApi' is not configured.");
 
         services.AddHttpClient<ICatalogClient, HttpCatalogClient>(client =>
-            client.BaseAddress = new Uri(catalogApiBaseUrl));
+                client.BaseAddress = new Uri(catalogApiBaseUrl))
+            .AddCatalogResilience();
 
         services.AddScoped<IOrderRepository, OrderRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();

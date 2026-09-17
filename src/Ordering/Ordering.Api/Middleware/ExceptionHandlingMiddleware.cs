@@ -17,7 +17,12 @@ public sealed class ExceptionHandlingMiddleware(RequestDelegate next, ILogger<Ex
         {
             var problem = Map(exception);
 
-            if (problem.Status >= 500)
+            // 503 is an anticipated degraded state (Catalog's resilience pipeline
+            // already exhausted its retries/tripped the breaker) — worth a warning,
+            // not an error-level "something we didn't expect" log.
+            if (problem.Status == StatusCodes.Status503ServiceUnavailable)
+                logger.LogWarning(exception, "Upstream dependency unavailable processing {Method} {Path}", context.Request.Method, context.Request.Path);
+            else if (problem.Status >= 500)
                 logger.LogError(exception, "Unhandled exception processing {Method} {Path}", context.Request.Method, context.Request.Path);
 
             context.Response.StatusCode = problem.Status ?? StatusCodes.Status500InternalServerError;
@@ -43,6 +48,12 @@ public sealed class ExceptionHandlingMiddleware(RequestDelegate next, ILogger<Ex
         {
             Title = "Conflict",
             Status = StatusCodes.Status409Conflict,
+            Detail = exception.Message,
+        },
+        CatalogUnavailableException => new ProblemDetails
+        {
+            Title = "Service unavailable",
+            Status = StatusCodes.Status503ServiceUnavailable,
             Detail = exception.Message,
         },
         InvalidOrderStateTransitionException or EmptyOrderException or ArgumentException => new ProblemDetails
