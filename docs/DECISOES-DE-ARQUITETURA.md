@@ -647,3 +647,86 @@ registrada como próximo passo em vez de forçada com um atalho frágil.
 *é* comparável à claim do próprio token (mesma convenção usada em Delivery — ver
 `CouriersAuthorizationTests`), então recusar com `HubException` quando não bate custou
 poucas linhas e fechou um IDOR real na assinatura de grupo do entregador.
+
+---
+
+## Fase 7 — Resiliência com Polly
+
+### 42. Escopo deliberadamente estreito: só existe uma chamada HTTP síncrona entre serviços
+
+`Microsoft.Extensions.Http.Resilience` foi adicionado só ao `HttpCatalogClient` do
+Ordering. Não existe nenhum outro lugar no sistema pra aplicar Polly: todo o resto da
+comunicação entre serviços passa pelo RabbitMQ, que já tem seu próprio mecanismo de
+retry (Outbox publisher, Fase 3; consumer com fila de delay + DLQ, Fase 4) — mecanismos
+desenhados especificamente pra mensageria assíncrona, não pra chamadas request/response.
+
+**Por quê isso vale registrar:** é tentador "adicionar Polly em tudo" quando o objetivo
+é destacar resiliência no portfólio, mas Polly resolve um problema específico (uma
+chamada HTTP síncrona que pode falhar de forma transitória ou sustentada) — aplicá-lo a
+publish/consume de fila seria duplicar uma solução que já existe lá, com uma forma
+diferente e mais adequada pro problema.
+
+### 43. Três estratégias empilhadas, cada uma pro formato de falha diferente
+
+`CatalogClientResilience.AddCatalogResilience` empilha, na ordem: timeout por
+tentativa (3s) → retry (3 tentativas, backoff exponencial com jitter, 200ms inicial) →
+circuit breaker (abre com 50% de falhas numa janela de 10s com pelo menos 4
+requisições, fica aberto por 15s).
+
+**Por quê nenhuma das três sozinha resolve o problema todo:**
+- só **timeout** protege contra uma chamada lenta, mas não ajuda numa falha rápida e
+  intermitente (ex.: uma conexão TCP resetada) — cada tentativa falharia rápido e
+  desistiria na primeira.
+- só **retry** protege contra uma falha intermitente, mas piora uma indisponibilidade
+  sustentada: se o Catalog está genuinamente fora do ar, cada pedido tentando 3 vezes
+  só adiciona carga a um serviço que já está sofrendo, e cada cliente espera o tempo
+  de 3 tentativas antes de falhar mesmo assim.
+- só **circuit breaker** sem retry falharia rápido demais em falhas passageiras que o
+  retry teria absorvido silenciosamente.
+
+Juntas: uma falha de um request isolado (ex. um timeout de rede) é absorvida pelo
+retry sem o chamador perceber; uma indisponibilidade sustentada é detectada depois de
+poucas falhas e o circuito abre, fazendo toda chamada seguinte falhar instantaneamente
+(sem gastar os 3 timeouts de retry) até o `BreakDuration` passar — dando ao Catalog
+uma janela sem tráfego adicional pra se recuperar.
+
+### 44. `HttpCatalogClient` traduz exceções do Polly antes de chegar na Application
+
+`GetRestaurantAsync` captura `HttpRequestException`, `BrokenCircuitException` e
+`TimeoutRejectedException` e relança como `CatalogUnavailableException` — uma exceção
+de `Ordering.Application`, sem nenhuma referência ao Polly.
+
+**Por quê:** a Application não deveria saber que a Infrastructure usa Polly
+especificamente (poderia ser outra biblioteca de resiliência amanhã) — ela só precisa
+saber "o Catalog não respondeu", que é um conceito de negócio (mapeado pra 503 no
+middleware), não um detalhe de biblioteca. Isso segue a mesma regra já estabelecida
+pras exceções de domínio vs. aplicação (item 17): a camada mais interna nunca deveria
+vazar o vocabulário de uma dependência externa pra dentro do domínio.
+
+`CatalogUnavailableException` (503) é deliberadamente distinta de
+`RestaurantUnavailableException` (409, Fase 2): a primeira significa "não conseguimos
+nem perguntar pro Catalog", a segunda significa "perguntamos, e o Catalog respondeu
+que esse restaurante não pode receber pedidos agora". São fatos diferentes que pedem
+reação diferente do cliente (tentar de novo em breve vs. esse pedido específico não
+vai funcionar).
+
+### 45. Teste de resiliência contra um servidor Kestrel real, não um `HttpMessageHandler` mockado
+
+`FlakyCatalogServer` sobe uma instância real de Kestrel (via `WebApplication`, porta
+dinâmica) que falha um número configurável de vezes antes de responder com sucesso —
+os 3 testes em `CatalogResilienceTests` conectam o `HttpCatalogClient` de verdade
+(com o pipeline de resiliência real) contra esse servidor via socket TCP real,
+verificando: retry absorvendo falhas transitórias (o servidor recebe 3 chamadas pra 1
+resultado bem-sucedido), esgotamento de tentativas virando `CatalogUnavailableException`
+(4 chamadas: 1 original + 3 retries), e o circuit breaker recusando chamadas sem
+sequer tocar o servidor de novo depois de abrir.
+
+**Por quê não teria sido suficiente mockar `HttpMessageHandler`:** um mock provaria
+que o código *chamaria* `SendAsync` um certo número de vezes dado um determinado
+retorno configurado — mas não exercitaria o comportamento real de timeout (que
+depende de tempo de execução de verdade) nem provaria que a configuração do
+`ResiliencePipeline` (nomes de opção, predicados `ShouldHandle`, thresholds do circuit
+breaker) está montada corretamente. Contra um servidor real, um erro de configuração
+do pipeline (por exemplo, `ShouldHandle` não capturando `HttpRequestException`)
+apareceria como um teste falhando de verdade, não como uma configuração nunca
+exercitada.
